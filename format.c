@@ -1977,6 +1977,21 @@ format_cb_mouse_button_flag(struct format_tree *ft)
 	return (NULL);
 }
 
+/* Callback for mouse_send_drag_flag. */
+static void *
+format_cb_mouse_send_drag_flag(struct format_tree *ft)
+{
+	if (ft->wp == NULL || !ft->m.valid ||
+	    ft->m.key != KEYC_MOUSEDRAG1_PANE)
+		return (NULL);
+	if (server_client_is_mouse_drag_select(ft->c, ft->s, ft->wp, &ft->m))
+		return (xstrdup("0"));
+	if (!TAILQ_EMPTY(&ft->wp->modes) ||
+	    (ft->wp->base.mode & ALL_MOUSE_MODES))
+		return (xstrdup("1"));
+	return (xstrdup("0"));
+}
+
 /* Callback for mouse_pane. */
 static void *
 format_cb_mouse_pane(struct format_tree *ft)
@@ -3710,6 +3725,9 @@ static const struct format_table_entry format_table[] = {
 	},
 	{ "mouse_pane", FORMAT_TABLE_STRING,
 	  format_cb_mouse_pane
+	},
+	{ "mouse_send_drag_flag", FORMAT_TABLE_STRING,
+	  format_cb_mouse_send_drag_flag
 	},
 	{ "mouse_sgr_flag", FORMAT_TABLE_STRING,
 	  format_cb_mouse_sgr_flag

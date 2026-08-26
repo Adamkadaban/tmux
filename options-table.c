@@ -944,6 +944,13 @@ const struct options_table_entry options_table[] = {
 		  "Applications inside panes can use the mouse even when 'off'."
 	},
 
+	{ .name = "mouse-drag-select",
+	  .type = OPTIONS_TABLE_FLAG,
+	  .scope = OPTIONS_TABLE_SESSION,
+	  .default_num = 0,
+	  .text = "Whether dragging in a mouse-aware pane enters copy mode."
+	},
+
 	{ .name = "prefix",
 	  .type = OPTIONS_TABLE_KEY,
 	  .scope = OPTIONS_TABLE_SESSION,

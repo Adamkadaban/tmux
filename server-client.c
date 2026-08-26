@@ -36,6 +36,13 @@ static void	server_client_check_window_resize(struct window *);
 static key_code	server_client_check_mouse(struct client *, struct key_event *);
 static void	server_client_repeat_timer(int, short, void *);
 static void	server_client_click_timer(int, short, void *);
+static int	server_client_is_button1_release(struct key_event *);
+static void	server_client_clear_mouse(struct client *);
+static void	server_client_clear_pending_mouse_on_release(struct client *,
+		    struct key_event *);
+static int	server_client_update_pending_mouse(struct client *, key_code,
+		    struct session *, struct winlink *, struct window_pane *,
+		    struct mouse_event *);
 static void	server_client_check_exit(struct client *, int);
 static void	server_client_exit_timer(int, short, void *);
 static void	server_client_check_redraw(struct client *);
@@ -314,6 +321,8 @@ server_client_create(int fd)
 	evtimer_set(&c->exit_timer, server_client_exit_timer, c);
 
 	c->click_wp = -1;
+	c->pending_mouse_wp = -1;
+	c->mouse_drag_select_wp = -1;
 
 	TAILQ_INIT(&c->input_requests);
 
@@ -452,6 +461,8 @@ server_client_set_session(struct client *c, struct session *s)
 {
 	struct session	*old = c->session;
 
+	if (old != s)
+		server_client_clear_mouse(c);
 	if (s != NULL && c->session != NULL && c->session != s)
 		c->last_session = c->session;
 	else if (s == NULL)
@@ -1152,6 +1163,13 @@ have_event:
 	    type != KEYC_TYPE_DOUBLECLICK &&
 	    type != KEYC_TYPE_TRIPLECLICK &&
 	    c->tty.mouse_drag_flag != 0) {
+		/* Keep selection drag release with the starting pane. */
+		if (lwp != NULL &&
+		    c->mouse_drag_select_wp == (int)lwp->id) {
+			loc = KEYC_MOUSE_LOCATION_PANE;
+			m->wp = lwp->id;
+			m->w = lwp->window->id;
+		}
 		if (c->tty.mouse_drag_release != NULL)
 			c->tty.mouse_drag_release(c, m);
 
@@ -1406,6 +1424,157 @@ server_client_handle_dead_key(struct window_pane *wp, key_code key)
 	return (1);
 }
 
+/* Check whether a mouse drag should enter copy mode. */
+int
+server_client_is_mouse_drag_select(struct client *c, struct session *s,
+    struct window_pane *wp, struct mouse_event *m)
+{
+	struct mouse_event	*pending;
+
+	if (c == NULL || s == NULL || wp == NULL || m == NULL || !m->valid)
+		return (0);
+	if (c->session != s || c->pending_mouse_wp != (int)wp->id)
+		return (0);
+	if (m->key != KEYC_MOUSEDRAG1_PANE ||
+	    !options_get_number(s->options, "mouse-drag-select"))
+		return (0);
+	if (!TAILQ_EMPTY(&wp->modes))
+		return (0);
+
+	pending = &c->pending_mouse_event;
+	return (pending->valid &&
+	    pending->key == KEYC_MOUSEDOWN1_PANE &&
+	    pending->s == (int)s->id &&
+	    pending->w == (int)wp->window->id &&
+	    pending->wp == (int)wp->id &&
+	    m->s == (int)s->id &&
+	    m->w == (int)wp->window->id &&
+	    m->wp == (int)wp->id);
+}
+
+/* Clear a pending mouse press. */
+void
+server_client_clear_pending_mouse(struct client *c)
+{
+	c->pending_mouse_wp = -1;
+	memset(&c->pending_mouse_event, 0, sizeof c->pending_mouse_event);
+}
+
+/* Clear all mouse selection state. */
+static void
+server_client_clear_mouse(struct client *c)
+{
+	struct mouse_event	 m;
+	struct window_pane	*wp;
+
+	if (c->mouse_drag_select_wp != -1) {
+		wp = window_pane_find_by_id(c->mouse_drag_select_wp);
+		if (wp != NULL && c->tty.mouse_drag_release != NULL &&
+		    c->session != NULL) {
+			memset(&m, 0, sizeof m);
+			m.valid = 1;
+			m.s = c->session->id;
+			m.w = wp->window->id;
+			m.wp = wp->id;
+			m.x = m.lx = c->tty.mouse_last_x;
+			m.y = m.ly = c->tty.mouse_last_y;
+			c->tty.mouse_drag_release(c, &m);
+		}
+		c->tty.mouse_drag_update = NULL;
+		c->tty.mouse_drag_release = NULL;
+		c->tty.mouse_drag_flag = 0;
+		c->tty.mouse_scrolling_flag = 0;
+		c->tty.mouse_slider_mpos = -1;
+		c->tty.mouse_last_pane = -1;
+		c->discard_mouse_release = 1;
+	}
+	server_client_clear_pending_mouse(c);
+	c->mouse_drag_select_wp = -1;
+}
+
+/* Set or clear the client read-only flag. */
+void
+server_client_set_readonly(struct client *c, int readonly)
+{
+	if (readonly) {
+		server_client_clear_mouse(c);
+		c->flags |= CLIENT_READONLY;
+	} else
+		c->flags &= ~CLIENT_READONLY;
+}
+
+/* Clear pending mouse presses for a pane. */
+void
+server_client_clear_pending_mouse_pane(struct window_pane *wp)
+{
+	struct client	*c;
+
+	TAILQ_FOREACH(c, &clients, entry) {
+		if (c->pending_mouse_wp == (int)wp->id)
+			server_client_clear_pending_mouse(c);
+	}
+}
+
+/* Send and clear a pending mouse press if it still targets this pane. */
+void
+server_client_send_pending_mouse(struct client *c, struct session *s,
+    struct winlink *wl, struct window_pane *wp)
+{
+	struct mouse_event	*m = &c->pending_mouse_event;
+
+	if (s != NULL && wl != NULL && wp != NULL &&
+	    c->pending_mouse_wp == (int)wp->id &&
+	    c->session == s && wl->window == wp->window &&
+	    m->valid && m->s == (int)s->id &&
+	    m->w == (int)wp->window->id && m->wp == (int)wp->id &&
+	    TAILQ_EMPTY(&wp->modes))
+		window_pane_key(wp, c, s, wl, m->key, m);
+	server_client_clear_pending_mouse(c);
+}
+
+/* Update a pending mouse press, returning non-zero to discard the key. */
+static int
+server_client_update_pending_mouse(struct client *c, key_code key,
+    struct session *s, struct winlink *wl, struct window_pane *wp,
+    struct mouse_event *m)
+{
+	if (c->pending_mouse_wp != -1 && KEYC_IS_MOUSE(key) &&
+	    (key & KEYC_MASK_KEY) != KEYC_MOUSEDRAG1_PANE &&
+	    !KEYC_IS_TYPE(key, KEYC_TYPE_MOUSEUP) &&
+	    !KEYC_IS_TYPE(key, KEYC_TYPE_MOUSEDRAGEND)) {
+		if (wp != NULL && c->pending_mouse_wp == (int)wp->id)
+			server_client_send_pending_mouse(c, s, wl, wp);
+		else
+			server_client_clear_pending_mouse(c);
+	}
+
+	if ((key & KEYC_MASK_KEY) == KEYC_MOUSEDRAG1_PANE &&
+	    wp != NULL && c->pending_mouse_wp == (int)wp->id &&
+	    !server_client_is_mouse_drag_select(c, s, wp, m))
+		server_client_send_pending_mouse(c, s, wl, wp);
+
+	if (KEYC_IS_TYPE(key, KEYC_TYPE_MOUSEUP) &&
+	    KEYC_MOUSE_BUTTON(key) == 1 && c->pending_mouse_wp != -1) {
+		if ((key & KEYC_MASK_KEY) == KEYC_MOUSEUP1_PANE &&
+		    wp != NULL && c->pending_mouse_wp == (int)wp->id)
+			server_client_send_pending_mouse(c, s, wl, wp);
+		else
+			server_client_clear_pending_mouse(c);
+	} else if (KEYC_IS_TYPE(key, KEYC_TYPE_MOUSEDRAGEND) &&
+	    KEYC_MOUSE_BUTTON(key) == 1) {
+		int discard = (c->mouse_drag_select_wp != -1 &&
+		    (wp == NULL || TAILQ_EMPTY(&wp->modes) ||
+		    TAILQ_FIRST(&wp->modes)->mode != &window_copy_mode));
+
+		c->mouse_drag_select_wp = -1;
+		if (discard || c->pending_mouse_wp != -1) {
+			server_client_clear_pending_mouse(c);
+			return (1);
+		}
+	}
+	return (0);
+}
+
 /*
  * Handle data key input from client. This owns and can modify the key event it
  * is given and is responsible for freeing it.
@@ -1450,11 +1619,27 @@ server_client_key_callback(struct cmdq_item *item, void *data)
 	/* Check for mouse keys. */
 	m->valid = 0;
 	if (key == KEYC_MOUSE || key == KEYC_DOUBLECLICK) {
-		if (c->flags & CLIENT_READONLY)
+		if (key == KEYC_MOUSE && c->discard_mouse_release) {
+			if (server_client_is_button1_release(event)) {
+				c->discard_mouse_release = 0;
+				goto out;
+			}
+			if (MOUSE_DRAG(m->b))
+				goto out;
+			if (!MOUSE_DRAG(m->b) && !MOUSE_RELEASE(m->b) &&
+			    MOUSE_BUTTONS(m->b) == MOUSE_BUTTON_1)
+				c->discard_mouse_release = 0;
+		}
+		if (c->flags & CLIENT_READONLY) {
+			server_client_clear_mouse(c);
 			goto out;
+		}
 		key = server_client_check_mouse(c, event);
-		if (key == KEYC_UNKNOWN)
+		if (key == KEYC_UNKNOWN) {
+			if (server_client_is_button1_release(event))
+				server_client_clear_mouse(c);
 			goto out;
+		}
 
 		m->valid = 1;
 		m->key = key;
@@ -1474,6 +1659,9 @@ server_client_key_callback(struct cmdq_item *item, void *data)
 	if (!KEYC_IS_MOUSE(key) || cmd_find_from_mouse(&fs, m, 0) != 0)
 		cmd_find_from_client(&fs, c, 0);
 	wp = fs.wp;
+
+	if (server_client_update_pending_mouse(c, key, s, wl, wp, m))
+		goto out;
 
 	/* Forward mouse keys if disabled. */
 	if (KEYC_IS_MOUSE(key) && !options_get_number(s->options, "mouse"))
@@ -1567,6 +1755,9 @@ try_again:
 
 	/* Try to see if there is a key binding in the current table. */
 	if (bd != NULL) {
+		if (c->pending_mouse_wp != -1 && !KEYC_IS_MOUSE(key))
+			server_client_clear_pending_mouse(c);
+
 		/*
 		 * Key was matched in this table. If currently repeating but a
 		 * non-repeating binding was found, stop repeating and try
@@ -1667,8 +1858,12 @@ forward_key:
 		goto out;
 	if (c->flags & CLIENT_READONLY)
 		goto out;
-	if (wp != NULL)
+	if (wp != NULL) {
+		if (c->pending_mouse_wp != -1)
+			server_client_send_pending_mouse(c, s, wl, wp);
 		window_pane_key(wp, c, s, wl, key, m);
+	} else
+		server_client_clear_pending_mouse(c);
 	goto out;
 
 paste_key:
@@ -1723,6 +1918,34 @@ server_client_handle_menu_key(struct client *c, struct key_event *event)
 	if (menu_key(c, w->menu, &new_event) == 1)
 		menu_close(w);
 	return (1);
+}
+
+/* Check a raw mouse event for a button 1 release. */
+static int
+server_client_is_button1_release(struct key_event *event)
+{
+	struct mouse_event	*m = &event->m;
+	u_int			 b;
+
+	if (event->key != KEYC_MOUSE || MOUSE_DRAG(m->b) ||
+	    !MOUSE_RELEASE(m->b))
+		return (0);
+	if (m->sgr_type == 'm')
+		b = m->sgr_b;
+	else
+		b = m->lb;
+	return (MOUSE_BUTTONS(b) == MOUSE_BUTTON_1);
+}
+
+/* Cancel a deferred press when another interface consumes its release. */
+static void
+server_client_clear_pending_mouse_on_release(struct client *c,
+    struct key_event *event)
+{
+	if (server_client_is_button1_release(event)) {
+		server_client_clear_mouse(c);
+		c->discard_mouse_release = 0;
+	}
 }
 
 /* Handle a key event. */
@@ -1783,6 +2006,9 @@ server_client_handle_key0(struct client *c, struct key_event *event,
 			if (server_client_handle_dead_key(wp, event->key))
 				return (0);
 			if (~wp->flags & PANE_EXITED) {
+				if (c->pending_mouse_wp != -1)
+					server_client_send_pending_mouse(c, s,
+					    s->curw, wp);
 				window_pane_key(wp, c, s, s->curw, event->key,
 				    &event->m);
 				return (0);
@@ -1844,11 +2070,24 @@ server_client_handle_key0(struct client *c, struct key_event *event,
 	return (1);
 }
 
+/* Handle a key, clearing mouse state if it is consumed immediately. */
+static int
+server_client_handle_key1(struct client *c, struct key_event *event,
+    struct cmdq_item *after, struct cmdq_item **next)
+{
+	int	retval;
+
+	retval = server_client_handle_key0(c, event, after, next);
+	if (retval == 0)
+		server_client_clear_pending_mouse_on_release(c, event);
+	return (retval);
+}
+
 /* Handle key and insert at end of queue. */
 int
 server_client_handle_key(struct client *c, struct key_event *event)
 {
-	return (server_client_handle_key0(c, event, NULL, NULL));
+	return (server_client_handle_key1(c, event, NULL, NULL));
 }
 
 /* Handle key and insert after another item. */
@@ -1856,7 +2095,7 @@ int
 server_client_handle_key_after(struct client *c, struct key_event *event,
     struct cmdq_item *after, struct cmdq_item **next)
 {
-	return (server_client_handle_key0(c, event, after, next));
+	return (server_client_handle_key1(c, event, after, next));
 }
 
 /* Client functions that need to happen every loop. */
@@ -3107,6 +3346,10 @@ server_client_set_flags(struct client *c, const char *flags)
 			continue;
 
 		log_debug("client %s set flag %s", c->name, next);
+		if (flag == CLIENT_READONLY && !not) {
+			server_client_set_readonly(c, 1);
+			continue;
+		}
 		if (not) {
 			if (c->flags & CLIENT_READONLY)
 				flag &= ~CLIENT_READONLY;
@@ -3170,6 +3413,32 @@ server_client_remove_pane(struct window_pane *wp)
 			c->tty.mouse_drag_update = NULL;
 			c->tty.mouse_scrolling_flag = 0;
 		}
+		if (c->pending_mouse_wp == (int)wp->id ||
+		    c->mouse_drag_select_wp == (int)wp->id)
+			server_client_clear_mouse(c);
+	}
+}
+
+/* Remove window from client mouse state before it is unlinked. */
+void
+server_client_remove_window(struct session *s, struct window *w)
+{
+	struct client		*c;
+	struct window_pane	*wp;
+
+	TAILQ_FOREACH(c, &clients, entry) {
+		if (c->session != s)
+			continue;
+		if (c->pending_mouse_wp != -1 &&
+		    c->pending_mouse_event.w == (int)w->id) {
+			server_client_clear_mouse(c);
+			continue;
+		}
+		if (c->mouse_drag_select_wp == -1)
+			continue;
+		wp = window_pane_find_by_id(c->mouse_drag_select_wp);
+		if (wp != NULL && wp->window == w)
+			server_client_clear_mouse(c);
 	}
 }
 

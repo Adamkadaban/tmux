@@ -101,9 +101,9 @@ server_acl_update(void)
 			c->exit_message = xstrdup("access not allowed");
 			c->flags |= CLIENT_EXIT;
 		} else if (entry->flags & SERVER_ACL_READONLY)
-			c->flags |= CLIENT_READONLY;
+			server_client_set_readonly(c, 1);
 		else
-			c->flags &= ~CLIENT_READONLY;
+			server_client_set_readonly(c, 0);
 	}
 }
 
@@ -227,6 +227,6 @@ server_acl_join(struct client *c)
 	if (entry == NULL)
 		return (0);
 	if (entry->flags & SERVER_ACL_READONLY)
-		c->flags |= CLIENT_READONLY;
+		server_client_set_readonly(c, 1);
 	return (1);
 }

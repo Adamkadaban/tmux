@@ -214,6 +214,18 @@ cmd_send_keys_exec(struct cmd *self, struct cmdq_item *item)
 			cmdq_error(item, "no mouse target");
 			return (CMD_RETURN_ERROR);
 		}
+		if (tc != NULL && tc == cmdq_get_client(item) &&
+		    m->key == KEYC_MOUSEDOWN1_PANE &&
+		    options_get_number(s->options, "mouse-drag-select") &&
+		    (wp->base.mode & ALL_MOUSE_MODES) &&
+		    TAILQ_EMPTY(&wp->modes)) {
+			tc->pending_mouse_wp = wp->id;
+			memcpy(&tc->pending_mouse_event, m,
+			    sizeof tc->pending_mouse_event);
+			return (CMD_RETURN_NORMAL);
+		}
+		if (server_client_is_mouse_drag_select(tc, s, wp, m))
+			server_client_send_pending_mouse(tc, s, wl, wp);
 		window_pane_key(wp, tc, s, wl, m->key, m);
 		return (CMD_RETURN_NORMAL);
 	}

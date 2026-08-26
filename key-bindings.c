@@ -505,7 +505,7 @@ key_bindings_init(void)
 		"bind -n MouseDown1Pane { select-pane -t=; send -M }",
 
 		/* Mouse button 1 drag on pane. */
-		"bind -n MouseDrag1Pane { if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { copy-mode -M } }",
+		"bind -n MouseDrag1Pane { if -F '#{mouse_send_drag_flag}' { send -M } { copy-mode -M } }",
 		"bind -n C-MouseDrag1Pane { new-pane -M }",
 		"bind -n C-MouseDrag1Empty { new-pane -M }",
 		"bind -n M-MouseDrag1Pane { move-pane -M }",

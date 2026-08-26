@@ -235,6 +235,7 @@ enum key_code_mouse_location {
 /* Bit shift for mouse events. */
 #define KEYC_MOUSE_LOCATION_SHIFT  0
 #define KEYC_MOUSE_BUTTON_SHIFT 8
+#define KEYC_MOUSE_BUTTON(k) (((k) >> KEYC_MOUSE_BUTTON_SHIFT) & 0xff)
 
 /* Mouse key codes. */
 #define KEYC_MOUSE_KEYS(t)                                             \
@@ -2253,6 +2254,10 @@ struct client {
 	struct event		 exit_timer;
 	u_int			 click_button;
 	struct mouse_event	 click_event;
+	int			 pending_mouse_wp;
+	int			 mouse_drag_select_wp;
+	int			 discard_mouse_release;
+	struct mouse_event	 pending_mouse_event;
 
 	struct status_line	 status;
 	struct event		 cycle_timer;
@@ -3327,6 +3332,13 @@ int	 server_client_check_nested(struct client *);
 int	 server_client_handle_key(struct client *, struct key_event *);
 int	 server_client_handle_key_after(struct client *, struct key_event *,
 	     struct cmdq_item *, struct cmdq_item **);
+int	 server_client_is_mouse_drag_select(struct client *, struct session *,
+	     struct window_pane *, struct mouse_event *);
+void	 server_client_clear_pending_mouse(struct client *);
+void	 server_client_clear_pending_mouse_pane(struct window_pane *);
+void	 server_client_send_pending_mouse(struct client *, struct session *,
+	     struct winlink *, struct window_pane *);
+void	 server_client_set_readonly(struct client *, int);
 struct client *server_client_create(int);
 int	 server_client_open(struct client *, char **);
 void	 server_client_unref(struct client *);
@@ -3340,6 +3352,7 @@ const char *server_client_get_cwd(struct client *, struct session *);
 void	 server_client_set_flags(struct client *, const char *);
 const char *server_client_get_flags(struct client *);
 void	 server_client_remove_pane(struct window_pane *);
+void	 server_client_remove_window(struct session *, struct window *);
 void	 server_client_print(struct client *, int, struct evbuffer *);
 
 /* server-fn.c */

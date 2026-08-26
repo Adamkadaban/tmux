@@ -87,10 +87,13 @@ cmd_switch_client_exec(struct cmd *self, struct cmdq_item *item)
 				return (CMD_RETURN_ERROR);
 			}
 		}
-		if (tc->flags & CLIENT_READONLY)
-			tc->flags &= ~(CLIENT_READONLY|CLIENT_IGNORESIZE);
-		else
-			tc->flags |= (CLIENT_READONLY|CLIENT_IGNORESIZE);
+		if (tc->flags & CLIENT_READONLY) {
+			server_client_set_readonly(tc, 0);
+			tc->flags &= ~CLIENT_IGNORESIZE;
+		} else {
+			server_client_set_readonly(tc, 1);
+			tc->flags |= CLIENT_IGNORESIZE;
+		}
 	}
 
 	tablename = args_get(args, 'T');

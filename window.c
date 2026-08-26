@@ -303,8 +303,15 @@ void
 winlink_remove(struct winlinks *wwl, struct winlink *wl)
 {
 	struct window	*w = wl->window;
+	struct winlink	*loop;
 
 	if (w != NULL) {
+		TAILQ_FOREACH(loop, &w->winlinks, wentry) {
+			if (loop != wl && loop->session == wl->session)
+				break;
+		}
+		if (loop == NULL)
+			server_client_remove_window(wl->session, w);
 		TAILQ_REMOVE(&w->winlinks, wl, wentry);
 		window_remove_ref(w, __func__);
 	}
@@ -1712,6 +1719,7 @@ window_pane_set_mode(struct window_pane *wp, struct window_pane *swp,
 	}
 	wme->kill = args != NULL ? args_has(args, 'k') : 0;
 	wp->screen = wme->screen;
+	server_client_clear_pending_mouse_pane(wp);
 
 	wp->flags |= (PANE_REDRAW|PANE_REDRAWSCROLLBAR|PANE_CHANGED);
 	layout_fix_panes(w, NULL);

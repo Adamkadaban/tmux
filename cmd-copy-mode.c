@@ -76,6 +76,9 @@ cmd_copy_mode_exec(struct cmd *self, struct cmdq_item *item)
 			return (CMD_RETURN_NORMAL);
 		if (c == NULL || c->session != s)
 			return (CMD_RETURN_NORMAL);
+		if (server_client_is_mouse_drag_select(c, s, wp, &event->m)) {
+			c->mouse_drag_select_wp = wp->id;
+		}
 	}
 
 	if (cmd_get_entry(self) == &cmd_clock_mode_entry) {
